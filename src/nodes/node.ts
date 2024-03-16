@@ -24,6 +24,21 @@ export async function node(
     k: null,
   };
 
+  let receivedMessagesR: { k: number, x: Value, phase: string }[] = [];
+  let receivedMessagesP: { k: number, x: Value, phase: string }[] = [];
+
+  async function sendMessageToAllProcesses(k: number, x: Value, phase: string) {
+    for (let i = 0; i < N; i++) {
+      if (i !== nodeId) {
+        await fetch(`http://localhost:${BASE_NODE_PORT + i}/message`, {
+          method: "POST",
+          body: JSON.stringify({ k, x, phase }),
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
+  }
+
   // TODO implement this
   // this route allows retrieving the current status of the node
   node.get("/status", (req, res) => {
@@ -37,12 +52,87 @@ export async function node(
 
   // TODO implement this
   // this route allows the node to receive messages from other nodes
-  node.post("/message", (req, res) => {
-    const message = req.body;
+  node.post("/message", async (req, res) => {
+    let { k, x, phase } = req.body;
 
-    nodeState.x = message.x;
-    nodeState.k = message.k;
+    if (nodeState.killed) {
+      res.status(500).send("node is killed");
+      return;
+    }
 
+    if (isFaulty) {
+      res.status(500).send("node is faulty");
+      return;
+    }
+
+    if (k === null || x === null || phase === null) {
+      res.status(500).send("missing parameters");
+      return;
+    }
+
+    // consensus(vp)                                                                          { vp is the initial value of process p }
+    // 1:  x := vp                                                                            { x is p's current estimate of the decision value }
+    // 2:  k := 0
+    // 3: while True do
+    // 4:   k := k + 1                                                                        { k is the current phase number }
+    // 5:   send (x, k) to all processes
+    // 6:   wait for messages of the form (R, k, *) from n-f processes                        { "*" can be 0 or 1 }
+    // 7:   if recceived more than n/2 (R, k, v) with the same v
+    // 8:   then send (P, k, v) to all processes
+    // 9:   else send (P, k, ?) to all processes
+    // 10:  wait for messages of the form (P, k, *) from n-f processes                        { "*" can be 0, 1 or ? }
+    // 11:  if received at least f+1 (P, k, *) from n-f processes then decide(v)
+    // 12:  if at least one (P, k, v) with v /= ? then x := v else x := 0 or 1 randomly       { query r.n.g.}
+
+    if (phase === "R") {
+      receivedMessagesR.push({ k, x, phase });
+
+      if (receivedMessagesR.length >= (N - F)) {
+        let numberOfZeroes = receivedMessagesR.filter(m => m.x === 0).length;
+        let numberOfOnes = receivedMessagesR.filter(m => m.x === 1).length;
+
+        if (numberOfZeroes > N / 2) {
+          await sendMessageToAllProcesses(k, 0, "P");
+        } else if (numberOfOnes > N / 2) {
+          await sendMessageToAllProcesses(k, 1, "P");
+        } else {
+          await sendMessageToAllProcesses(k, "?", "P");
+        }
+      }
+
+    } else if (phase === "P") {
+      receivedMessagesP.push({ k, x, phase });
+
+      if (receivedMessagesP.length >= (N - F)) {
+        let numberOfZeroes = receivedMessagesP.filter(m => m.x === 0).length;
+        let numberOfOnes = receivedMessagesP.filter(m => m.x === 1).length;
+
+        if (numberOfZeroes >= F + 1) {
+          nodeState.x = 0;
+          nodeState.decided = true;
+        } else if (numberOfOnes >= F + 1) {
+          nodeState.x = 1;
+          nodeState.decided = true;
+        } else {
+          if (numberOfZeroes === 0 && numberOfOnes === 0) {
+            nodeState.x = Math.random() < 0.5 ? 0 : 1;
+          } else {
+            if (numberOfZeroes > numberOfOnes) {
+              nodeState.x = 0;
+            } else {
+              nodeState.x = 1;
+            }
+          }
+
+          nodeState.k = k + 1;
+          
+          if (nodeState.k) {
+            await sendMessageToAllProcesses(nodeState.k, nodeState.x, "R");
+          }
+        }
+      }
+    }
+    
     res.status(200).send("message received");
   });
 
@@ -54,22 +144,18 @@ export async function node(
       return;
     }
 
-    // the algorithm should set the value of nodeState.x and nodeState.decided
+    if (isFaulty) {
+      res.status(500).send("node is faulty");
+      return;
+    }
+
     nodeState.x = initialValue;
-    nodeState.decided = true;
-    
-    // the algorithm should also set the value of nodeState.k
     nodeState.k = 0;
-    // the value of nodeState.k should be the round number at which the node decided on a value
+    nodeState.decided = false;
 
-    // the algorithm should be non-blocking and should return immediately
+    await sendMessageToAllProcesses(nodeState.k, nodeState.x, "R");
 
-    // the algorithm should be started by calling the /start route
-    
-
-    // the algorithm should be stopped by calling the /stop route
-
-    // the algorithm
+    res.status(200).send("consensus started");
   });
 
   // TODO implement this
