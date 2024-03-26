@@ -2,7 +2,7 @@ import bodyParser from "body-parser";
 import express from "express";
 import { BASE_NODE_PORT } from "../config";
 import { NodeState, Value } from "../types";
-import e from "express";
+import { delay } from "../utils";
 
 export async function node(
   nodeId: number, // the ID of the node
@@ -17,25 +17,25 @@ export async function node(
   node.use(express.json());
   node.use(bodyParser.json());
 
-  const nodeState: NodeState = {
+  let nodeState: NodeState = {
     killed: false,
     x: null,
     decided: null,
     k: null,
   };
 
-  let receivedMessagesR: { k: number, x: Value, phase: string }[] = [];
-  let receivedMessagesP: { k: number, x: Value, phase: string }[] = [];
+  let receivedMessagesR: number[][] = [];
+  let receivedMessagesP: number[][] = [];
+  receivedMessagesR[0] = [];
+  receivedMessagesP[0] = [];
 
   async function sendMessageToAllProcesses(k: number, x: Value, phase: string) {
     for (let i = 0; i < N; i++) {
-      if (i !== nodeId) {
-        await fetch(`http://localhost:${BASE_NODE_PORT + i}/message`, {
-          method: "POST",
-          body: JSON.stringify({ k, x, phase }),
-          headers: { "Content-Type": "application/json" },
-        });
-      }
+      await fetch(`http://localhost:${BASE_NODE_PORT + i}/message`, {
+        method: "POST",
+        body: JSON.stringify({ k, x, phase }),
+        headers: { "Content-Type": "application/json" },
+      });
     }
   }
 
@@ -55,21 +55,6 @@ export async function node(
   node.post("/message", async (req, res) => {
     let { k, x, phase } = req.body;
 
-    if (nodeState.killed) {
-      res.status(500).send("node is killed");
-      return;
-    }
-
-    if (isFaulty) {
-      res.status(500).send("node is faulty");
-      return;
-    }
-
-    if (k === null || x === null || phase === null) {
-      res.status(500).send("missing parameters");
-      return;
-    }
-
     // consensus(vp)                                                                          { vp is the initial value of process p }
     // 1:  x := vp                                                                            { x is p's current estimate of the decision value }
     // 2:  k := 0
@@ -84,50 +69,59 @@ export async function node(
     // 11:  if received at least f+1 (P, k, *) from n-f processes then decide(v)
     // 12:  if at least one (P, k, v) with v /= ? then x := v else x := 0 or 1 randomly       { query r.n.g.}
 
-    if (phase === "R") {
-      receivedMessagesR.push({ k, x, phase });
-
-      if (receivedMessagesR.length >= (N - F)) {
-        let numberOfZeroes = receivedMessagesR.filter(m => m.x === 0).length;
-        let numberOfOnes = receivedMessagesR.filter(m => m.x === 1).length;
-
-        if (numberOfZeroes > N / 2) {
-          await sendMessageToAllProcesses(k, 0, "P");
-        } else if (numberOfOnes > N / 2) {
-          await sendMessageToAllProcesses(k, 1, "P");
-        } else {
-          await sendMessageToAllProcesses(k, "?", "P");
+    if (!nodeState.killed && !isFaulty) {
+      if (phase === "R") {
+        if (receivedMessagesR[k] === undefined) {
+          receivedMessagesR[k] = [];
         }
-      }
-
-    } else if (phase === "P") {
-      receivedMessagesP.push({ k, x, phase });
-
-      if (receivedMessagesP.length >= (N - F)) {
-        let numberOfZeroes = receivedMessagesP.filter(m => m.x === 0).length;
-        let numberOfOnes = receivedMessagesP.filter(m => m.x === 1).length;
-
-        if (numberOfZeroes >= F + 1) {
-          nodeState.x = 0;
-          nodeState.decided = true;
-        } else if (numberOfOnes >= F + 1) {
-          nodeState.x = 1;
-          nodeState.decided = true;
-        } else {
-          if (numberOfZeroes === 0 && numberOfOnes === 0) {
-            nodeState.x = Math.random() < 0.5 ? 0 : 1;
+        receivedMessagesR[k].push(x);
+  
+        if (receivedMessagesR[k].length >= (N - F)) {
+          let numberOfZeroesR = receivedMessagesR[k].filter((value) => (value) === 0).length;
+          let numberOfOnesR = receivedMessagesR[k].filter((value) => (value) === 1).length;
+  
+          if (numberOfZeroesR > N / 2) {
+            x = 0;
+          } else if (numberOfOnesR > N / 2) {
+            x = 1;
           } else {
-            if (numberOfZeroes > numberOfOnes) {
-              nodeState.x = 0;
-            } else {
-              nodeState.x = 1;
-            }
+            x = "?";
           }
 
-          nodeState.k = k + 1;
-          
-          if (nodeState.k) {
-            await sendMessageToAllProcesses(nodeState.k, nodeState.x, "R");
+          await sendMessageToAllProcesses(k, x, "P");
+        }
+      } else if (phase === "P") {
+        if (receivedMessagesP[k] === undefined) {
+          receivedMessagesP[k] = [];
+        }
+        receivedMessagesP[k].push(x);
+  
+        if (receivedMessagesP[k].length >= (N - F)) {
+          let numberOfZeroesP = receivedMessagesP[k].filter((value) => (value) === 0).length;
+          let numberOfOnesP = receivedMessagesP[k].filter((value) => (value) === 1).length;
+  
+          if (numberOfZeroesP >= F + 1) {
+            nodeState.x = 0;
+            nodeState.decided = true;
+          } else if (numberOfOnesP >= F + 1) {
+            nodeState.x = 1;
+            nodeState.decided = true;
+          } else {
+            if (numberOfZeroesP + numberOfOnesP == 0) {
+              nodeState.x = Math.random() > 0.5 ? 0 : 1;
+            } else {
+              if (numberOfZeroesP > numberOfOnesP) {
+                nodeState.x = 0;
+              } else {
+                nodeState.x = 1;
+              }
+            }
+  
+            nodeState.k = k + 1;
+            
+            if (nodeState.k) {
+              await sendMessageToAllProcesses(nodeState.k, nodeState.x, "R");
+            }
           }
         }
       }
@@ -139,21 +133,17 @@ export async function node(
   // TODO implement this
   // this route is used to start the consensus algorithm
   node.get("/start", async (req, res) => {
-    if (!nodesAreReady()) {
-      res.status(500).send("nodes are not ready yet");
-      return;
+    while (!nodesAreReady()) {
+      await delay(50);
     }
 
-    if (isFaulty) {
-      res.status(500).send("node is faulty");
-      return;
+    if (!isFaulty) {
+      nodeState.x = initialValue;
+      nodeState.k = 0;
+      nodeState.decided = false;
+
+      await sendMessageToAllProcesses(nodeState.k, nodeState.x, "R");
     }
-
-    nodeState.x = initialValue;
-    nodeState.k = 0;
-    nodeState.decided = false;
-
-    await sendMessageToAllProcesses(nodeState.k, nodeState.x, "R");
 
     res.status(200).send("consensus started");
   });
